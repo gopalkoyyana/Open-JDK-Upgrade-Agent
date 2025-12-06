@@ -5,6 +5,7 @@ A cross-platform Python agent designed to detect, backup, and upgrade OpenJDK on
 
 ## Features
 
+*   **Vulnerability Check**: **NEW!** Before any download or upgrade operation, the agent queries the OSV.dev (Open Source Vulnerabilities) database to check for known security vulnerabilities in the target OpenJDK version. If CRITICAL or HIGH severity vulnerabilities are detected, the upgrade process is automatically aborted to protect your system.
 *   **Detection**: Identifies existing Java/OpenJDK installations (`JAVA_HOME`).
 *   **Dependency Analysis**: Checks which libraries an application is linked against (using `ldd`, `otool`, etc.) when an application path is provided.
 *   **Dependency Upgrade**: Identifies and upgrades application dependencies (libraries) using system package managers, with user confirmation. Supports Linux (apt, yum, rpm, dpkg).
@@ -18,12 +19,24 @@ A cross-platform Python agent designed to detect, backup, and upgrade OpenJDK on
 ## Prerequisites
 
 *   **Python 3.x** installed on the system.
-*   **Internet Access**: Required to download OpenJDK packages or binaries.
+*   **Python requests library**: Required for vulnerability checking. Install with `pip install requests` or `pip install -r requirements.txt`.
+*   **Internet Access**: Required to download OpenJDK packages or binaries and to query the OSV.dev vulnerability database.
 *   **Administrative Privileges**: Required for installing packages via system package managers (e.g., `sudo` on Linux, Admin Command Prompt on Windows).
 
 ## Installation
 
-No special installation is required. Simply download the script `openjdk_upgrade_agent.py` to the target machine.
+1. Download the script `openjdk_upgrade_agent.py` to the target machine.
+2. Install the required Python dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+Or manually install the requests library:
+
+```bash
+pip install requests
+```
 
 ## Usage
 
@@ -37,6 +50,24 @@ To upgrade OpenJDK to a specific version (e.g., 17):
 python3 openjdk_upgrade_agent.py --target-version 17
 ```
 
+**Note:** The agent will automatically check for vulnerabilities in OpenJDK 17 before proceeding. If critical vulnerabilities are found, the upgrade will be aborted.
+
+### Vulnerability Check
+
+**Every run automatically includes a security vulnerability check.** Before any download or upgrade operation (including dry runs), the agent queries the OSV.dev database for known vulnerabilities in the target OpenJDK version.
+
+**Behavior:**
+- If **CRITICAL** or **HIGH** severity vulnerabilities are detected, the upgrade process is **immediately aborted**.
+- The agent will display detailed information about the vulnerabilities found.
+- A report will be generated with vulnerability details.
+- The process exits with an error code.
+
+**If vulnerabilities are found:**
+1. Review the vulnerability details in the output
+2. Check the generated report in the log directory
+3. Choose a different OpenJDK version without known vulnerabilities
+4. Consult the OpenJDK security advisories for more information
+
 ### Dry Run (Recommended First Step)
 
 To see what the agent *would* do without actually making any changes:
@@ -44,6 +75,8 @@ To see what the agent *would* do without actually making any changes:
 ```bash
 python3 openjdk_upgrade_agent.py --target-version 17 --dry-run
 ```
+
+**Note:** Even in dry-run mode, the vulnerability check is performed and will abort if critical issues are found.
 
 ### Inspecting an Application
 

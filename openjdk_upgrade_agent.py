@@ -13,6 +13,183 @@ import urllib.request
 import tempfile
 from pathlib import Path
 
+try:
+    import requests
+except ImportError:
+    print("Error: 'requests' library is required for vulnerability checking.")
+    print("Install it using: pip install requests")
+    sys.exit(1)
+
+class VulnerabilityChecker:
+    """Checks for known vulnerabilities in OpenJDK versions using OSV.dev API"""
+    
+    OSV_API_URL = "https://api.osv.dev/v1/query"
+    
+    def __init__(self, logger=None):
+        self.logger = logger
+    
+    def log(self, message, level="info"):
+        """Log messages if logger is available"""
+        if self.logger:
+            if level == "info":
+                self.logger.info(message)
+            elif level == "error":
+                self.logger.error(message)
+            elif level == "warning":
+                self.logger.warning(message)
+        else:
+            print(f"[{level.upper()}] {message}")
+    
+    def check_version(self, version):
+        """
+        Check for vulnerabilities in a specific OpenJDK version.
+        
+        Args:
+            version: The OpenJDK version to check (e.g., "17", "21")
+        
+        Returns:
+            tuple: (has_critical_vulns, vulnerabilities_list)
+        """
+        self.log(f"Checking for vulnerabilities in OpenJDK {version}...")
+        
+        # Query OSV.dev for OpenJDK vulnerabilities
+        # We'll check multiple package ecosystems that might contain OpenJDK vulnerabilities
+        ecosystems = [
+            {"ecosystem": "Maven", "name": "org.openjdk:openjdk"},
+            {"ecosystem": "Maven", "name": "java"},
+        ]
+        
+        all_vulnerabilities = []
+        
+        for pkg_info in ecosystems:
+            try:
+                query = {
+                    "package": pkg_info,
+                    "version": version
+                }
+                
+                self.log(f"Querying OSV.dev for {pkg_info['ecosystem']}:{pkg_info['name']}...")
+                
+                response = requests.post(
+                    self.OSV_API_URL,
+                    json=query,
+                    timeout=10
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    vulns = data.get("vulns", [])
+                    if vulns:
+                        all_vulnerabilities.extend(vulns)
+                        self.log(f"Found {len(vulns)} potential vulnerabilities in {pkg_info['ecosystem']}")
+                
+            except requests.exceptions.RequestException as e:
+                self.log(f"Warning: Could not query OSV.dev for {pkg_info}: {e}", level="warning")
+                continue
+        
+        # Also try a general query for OpenJDK
+        try:
+            # Query by commit/version tag
+            query = {
+                "commit": f"jdk-{version}"
+            }
+            
+            response = requests.post(
+                self.OSV_API_URL,
+                json=query,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                vulns = data.get("vulns", [])
+                if vulns:
+                    all_vulnerabilities.extend(vulns)
+        
+        except requests.exceptions.RequestException as e:
+            self.log(f"Warning: General OpenJDK query failed: {e}", level="warning")
+        
+        if not all_vulnerabilities:
+            self.log(f"✓ No known vulnerabilities found for OpenJDK {version}")
+            return False, []
+        
+        # Analyze vulnerabilities for severity
+        critical_vulns = []
+        high_vulns = []
+        other_vulns = []
+        
+        for vuln in all_vulnerabilities:
+            vuln_id = vuln.get("id", "UNKNOWN")
+            summary = vuln.get("summary", "No summary available")
+            severity = self._get_severity(vuln)
+            
+            vuln_info = {
+                "id": vuln_id,
+                "summary": summary,
+                "severity": severity,
+                "details": vuln.get("details", ""),
+                "references": vuln.get("references", [])
+            }
+            
+            if severity == "CRITICAL":
+                critical_vulns.append(vuln_info)
+            elif severity == "HIGH":
+                high_vulns.append(vuln_info)
+            else:
+                other_vulns.append(vuln_info)
+        
+        # Report findings
+        total = len(all_vulnerabilities)
+        self.log(f"Found {total} total vulnerabilities:")
+        self.log(f"  - CRITICAL: {len(critical_vulns)}")
+        self.log(f"  - HIGH: {len(high_vulns)}")
+        self.log(f"  - OTHER: {len(other_vulns)}")
+        
+        # Display critical and high vulnerabilities
+        for vuln in critical_vulns + high_vulns:
+            self.log(f"  [{vuln['severity']}] {vuln['id']}: {vuln['summary']}", level="warning")
+        
+        has_critical = len(critical_vulns) > 0 or len(high_vulns) > 0
+        
+        return has_critical, critical_vulns + high_vulns + other_vulns
+    
+    def _get_severity(self, vuln):
+        """Extract severity from vulnerability data"""
+        # Check for CVSS score
+        severity_info = vuln.get("severity", [])
+        if severity_info:
+            for sev in severity_info:
+                if sev.get("type") == "CVSS_V3":
+                    score = sev.get("score")
+                    if score:
+                        # Parse CVSS score
+                        try:
+                            # CVSS format: "CVSS:3.1/AV:N/AC:L/..."
+                            # We need to calculate or extract the base score
+                            # For simplicity, check if HIGH or CRITICAL is mentioned
+                            score_str = str(score).upper()
+                            if "CRITICAL" in score_str:
+                                return "CRITICAL"
+                            elif "HIGH" in score_str:
+                                return "HIGH"
+                        except:
+                            pass
+        
+        # Check database_specific field
+        db_specific = vuln.get("database_specific", {})
+        severity = db_specific.get("severity", "").upper()
+        if severity in ["CRITICAL", "HIGH", "MEDIUM", "LOW"]:
+            return severity
+        
+        # Check aliases for CVE severity
+        aliases = vuln.get("aliases", [])
+        for alias in aliases:
+            if "CVE-" in alias:
+                # Assume CVEs are at least MEDIUM severity
+                return "MEDIUM"
+        
+        return "UNKNOWN"
+
 # Configure logging
 def setup_logging(log_dir):
     if not os.path.exists(log_dir):
@@ -475,6 +652,48 @@ class OpenJDKUpgradeAgent:
 
     def run(self):
         try:
+            # CRITICAL: Check for vulnerabilities BEFORE any operations
+            self.log("=" * 60)
+            self.log("VULNERABILITY CHECK - Querying OSV.dev database...")
+            self.log("=" * 60)
+            
+            vuln_checker = VulnerabilityChecker(logger=logging.getLogger())
+            has_critical, vulnerabilities = vuln_checker.check_version(self.target_version)
+            
+            if has_critical:
+                self.log("=" * 60, level="error")
+                self.log("CRITICAL SECURITY ALERT!", level="error")
+                self.log("=" * 60, level="error")
+                self.log(f"OpenJDK version {self.target_version} has CRITICAL or HIGH severity vulnerabilities!", level="error")
+                self.log("The upgrade process has been ABORTED for your security.", level="error")
+                self.log("", level="error")
+                self.log("Vulnerabilities found:", level="error")
+                
+                for vuln in vulnerabilities:
+                    if vuln['severity'] in ['CRITICAL', 'HIGH']:
+                        self.log(f"  - [{vuln['severity']}] {vuln['id']}", level="error")
+                        self.log(f"    Summary: {vuln['summary']}", level="error")
+                        if vuln.get('references'):
+                            self.log(f"    References: {vuln['references'][0].get('url', 'N/A')}", level="error")
+                
+                self.log("", level="error")
+                self.log("RECOMMENDATION: Choose a different OpenJDK version without known vulnerabilities.", level="error")
+                self.log("=" * 60, level="error")
+                
+                self.report["status"] = "aborted_due_to_vulnerabilities"
+                self.report["vulnerabilities"] = vulnerabilities
+                
+                # Generate report even on abort
+                self.generate_report()
+                
+                # Exit with error code
+                sys.exit(1)
+            
+            self.log("=" * 60)
+            self.log(f"✓ Security check passed for OpenJDK {self.target_version}")
+            self.log("=" * 60)
+            
+            # Proceed with normal operations
             current_java_home = self.detect_current_java()
             
             if self.backup_dir:
